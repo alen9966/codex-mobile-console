@@ -1,0 +1,91 @@
+const $=s=>document.querySelector(s);
+const key='dsss.remote.v1';let saved;try{saved=JSON.parse(localStorage.getItem(key)||'{}');}catch{saved={};}
+let endpoint=saved.endpoint||'',token=saved.token||'',updating=false,rendered='',retryRequest=null,selectedThread=saved.threadId||'',catalog=null;
+const store=()=>localStorage.setItem(key,JSON.stringify({endpoint,token,threadId:selectedThread}));
+const option=(value,label)=>{const o=document.createElement('option');o.value=value;o.textContent=label;return o;};
+function pickThread(id){
+ selectedThread=id;retryRequest=null;rendered='';store();$('#messages').replaceChildren();$('#jobs').replaceChildren();
+ $('#status').textContent=id?'读取中':'暂无会话';$('#messageCount').textContent='';$('#queueCount').textContent='0';
+ const t=catalog.threads.find(t=>t.id===id);$('#targetHint').textContent=t?'发送目标：'+t.title:'该工程暂无会话；请先在电脑 Codex 中创建会话。';
+ $('#sendBtn').disabled=!t;$('#taskTitle').textContent=t?.title||'暂无会话';$('#activity').textContent=t?'正在读取该会话…':'可在电脑打开工程并创建会话，再刷新工程列表。';$('#sendResult').textContent='';
+ if(t)refresh();
+}
+function drawThreads(projectId){
+ const list=catalog.threads.filter(t=>t.projectId===projectId),select=$('#threadSelect');select.replaceChildren();
+ for(const t of list)select.append(option(t.id,t.title));
+ const id=list.some(t=>t.id===selectedThread)?selectedThread:list[0]?.id||'';select.value=id;select.disabled=!list.length;pickThread(id);
+}
+async function loadCatalog(force=false){
+ catalog=await api('/api/catalog'+(force?'?refresh=1':''));
+ const p=$('#projectSelect');p.replaceChildren();
+ for(const project of catalog.projects){const n=catalog.threads.filter(t=>t.projectId===project.id).length;p.append(option(project.id,project.label+' · '+n+' 个会话'));}
+ if(!catalog.threads.some(t=>t.id===selectedThread))selectedThread=catalog.defaultThreadId;
+ p.value=catalog.threads.find(t=>t.id===selectedThread)?.projectId||catalog.projects[0]?.id||'';drawThreads(p.value);
+}
+function toast(text){$('#toast').textContent=text;$('#toast').hidden=false;setTimeout(()=>$('#toast').hidden=true,3500);}
+async function api(path,options={}){
+ const r=await fetch(endpoint+path,{...options,headers:{...(token?{Authorization:'Bearer '+token}:{}),...(options.body?{'Content-Type':'application/json'}:{}),...options.headers},signal:AbortSignal.timeout(30000),cache:'no-store'});
+ let j;try{j=await r.json();}catch{throw Error('连接器未返回有效数据，请确认电脑连接地址');}
+ if(!r.ok){if(r.status===401&&path!=='/api/login'){token='';store();showPair();}throw Error(j.error||'请求失败');}return j;
+}
+function showPair(){ $('#pairPanel').hidden=false;$('#workspace').hidden=true;$('#logoutBtn').hidden=true;$('#endpoint').value=endpoint;$('#connectionText').textContent='尚未配对';$('#dot').className='dot';}
+function connected(){ $('#pairPanel').hidden=true;$('#workspace').hidden=false;$('#logoutBtn').hidden=false;}
+function textEl(tag,cls,text){const el=document.createElement(tag);el.className=cls;el.textContent=text;return el;}
+function drawMessages(messages){
+ const signature=messages.map(x=>x.id+':'+x.text).join('|');if(signature===rendered)return;rendered=signature;
+ const box=$('#messages'),nearBottom=box.scrollHeight-box.scrollTop-box.clientHeight<90||!box.children.length;
+ const oldScroll=box.scrollTop;box.replaceChildren();
+ for(const m of messages){const el=textEl('article','message '+m.role+' '+m.phase,'');el.append(textEl('div','who',m.role==='user'?'你 / 任务输入':m.phase==='commentary'?'CODEX / 进度更新':'CODEX / 回复'));el.append(textEl('div','bubble',m.text));box.append(el);}
+ if(!messages.length)box.append(textEl('p','empty','当前会话暂无消息'));
+ if(nearBottom)box.scrollTop=box.scrollHeight;else box.scrollTop=oldScroll;
+ $('#messageCount').textContent='最近 '+messages.length+' 条';
+}
+function drawJobs(jobs){
+ const box=$('#jobs');box.replaceChildren();$('#queueCount').textContent=jobs.filter(x=>x.state==='queued').length;
+ const labels={queued:'排队中',sending:'正在发送',accepted:'桌面已接收',failed:'发送失败',uncertain:'需要核对',cancelled:'已取消'};
+ for(const j of [...jobs].reverse().slice(0,10)){
+   const el=textEl('article','job',''),top=textEl('div','job-head','');top.append(textEl('small','',j.kind==='task'?'安排任务':'提问 / 补充'));top.append(textEl('span','badge '+(['queued','uncertain','failed'].includes(j.state)?'warn':'neutral'),labels[j.state]||j.state));el.append(top,textEl('p','',j.text),textEl('small','',new Date(j.createdAt).toLocaleString('zh-CN')));
+   if(j.error)el.append(textEl('p','error',j.error));
+   if(j.state==='accepted')el.append(textEl('p','muted','已接收不等于已完成，执行结果见对话。'));
+   if(j.state==='queued'){const b=textEl('button','text-btn','取消排队');b.onclick=async()=>{try{await api('/api/messages/'+encodeURIComponent(j.id),{method:'DELETE'});await refresh();}catch(e){toast(e.message);}};el.append(b);}
+   box.append(el);
+ }
+ if(!jobs.length)box.append(textEl('p','empty','暂无手机发送记录'));
+}
+async function refresh(){
+ if(!token||updating||!selectedThread)return;updating=true;const requested=selectedThread;
+ try{
+   const j=await api('/api/state?threadId='+encodeURIComponent(requested));if(requested!==selectedThread)return;connected();$('#dot').className='dot '+(j.connected?'online':'offline');$('#connectionText').textContent=j.connected?'电脑已连接':'桌面连接异常';
+   $('#syncTime').textContent=j.syncedAt?'最近同步 '+new Date(j.syncedAt).toLocaleTimeString('zh-CN'):'等待首次同步';
+   const t=j.thread||{};$('#status').textContent=t.statusLabel||'未连接';$('#status').className='badge '+(t.status==='active'?'':'neutral');$('#taskTitle').textContent=t.title||'当前桌面任务';$('#activity').textContent=j.error||j.activity||'等待任务';
+   drawMessages(j.messages||[]);drawJobs(j.jobs||[]);
+ }catch(e){if(requested===selectedThread){$('#dot').className='dot offline';$('#connectionText').textContent='连接中断';$('#syncTime').textContent='保留上次内容；联网后自动重试';$('#activity').textContent=e.message;}}
+ finally{updating=false;if(requested!==selectedThread&&selectedThread)refresh();}
+}
+$('#pairForm').onsubmit=async e=>{
+ e.preventDefault();$('#pairError').textContent='';const b=e.submitter;b.disabled=true;
+ try{
+  const u=new URL($('#endpoint').value.trim());if(u.protocol!=='https:'&&!(u.hostname==='127.0.0.1'&&u.protocol==='http:'))throw Error('外网连接地址必须使用HTTPS');if(u.username||u.password||u.search||u.hash)throw Error('连接地址不能包含密码或查询参数');endpoint=u.origin;
+  const result=await api('/api/login',{method:'POST',body:JSON.stringify({code:$('#pairCode').value})});token=result.token;store();$('#pairCode').value='';connected();await loadCatalog();await refresh();toast('配对成功，已连接桌面');
+ }catch(e){$('#pairError').textContent=e.message;}finally{b.disabled=false;}
+};
+$('#sendForm').onsubmit=async e=>{
+ e.preventDefault();const text=$('#prompt').value.trim(),kind=$('input[name=kind]:checked').value;if(!text)return;
+ if(!selectedThread)return;const target=selectedThread;const signature=target+'\n'+kind+'\n'+text;if(!retryRequest||retryRequest.signature!==signature)retryRequest={signature,id:crypto.randomUUID()};
+ $('#sendBtn').disabled=true;$('#sendResult').textContent='正在发送…';
+ $('#projectSelect').disabled=true;$('#threadSelect').disabled=true;$('#catalogBtn').disabled=true;
+ try{const j=await api('/api/messages',{method:'POST',body:JSON.stringify({text,kind,threadId:target,requestId:retryRequest.id})});if(target===selectedThread){$('#sendResult').textContent=j.note||'已记录，请查看发送记录';$('#prompt').value='';retryRequest=null;}await refresh();}
+ catch(e){$('#sendResult').textContent=e.message+'。重试会沿用同一请求标识，避免重复发送。';}
+ finally{$('#sendBtn').disabled=!selectedThread;$('#projectSelect').disabled=false;$('#threadSelect').disabled=!selectedThread;$('#catalogBtn').disabled=false;}
+};
+document.querySelectorAll('input[name=kind]').forEach(el=>el.onchange=()=>{$('#sendHint').textContent=el.value==='task'?'桌面忙碌时先排队，空闲后自动发送到当前会话。':'发送到当前会话，忙碌时也可补充问题。';$('#prompt').placeholder=el.value==='task'?'例如：完成当前工作后，继续定位独立铷钟下的坏帧。':'例如：目前坏帧定位到哪一步了？';});
+$('#settingsBtn').onclick=()=>{$('#pairPanel').hidden=!$('#pairPanel').hidden;$('#endpoint').value=endpoint;};
+$('#refreshBtn').onclick=refresh;$('#bottomBtn').onclick=()=>$('#messages').scrollTop=$('#messages').scrollHeight;
+$('#logoutBtn').onclick=async()=>{try{await api('/api/logout',{method:'POST'});}catch{}token='';store();showPair();};
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
+try{const c=await fetch('connection.json',{cache:'no-store'}).then(r=>r.json());if(!endpoint)endpoint=c.endpoint||location.origin;}catch{if(!endpoint)endpoint=location.origin;}
+$('#projectSelect').onchange=()=>drawThreads($('#projectSelect').value);
+$('#threadSelect').onchange=()=>pickThread($('#threadSelect').value);
+$('#catalogBtn').onclick=async()=>{try{await loadCatalog(true);}catch(e){toast(e.message);}};
+$('#endpoint').value=endpoint;if(token){connected();try{await loadCatalog();await refresh();}catch(e){$('#activity').textContent=e.message;}}else showPair();
+setInterval(()=>{if(!document.hidden)refresh();},4000);
