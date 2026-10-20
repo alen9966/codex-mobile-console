@@ -48,6 +48,7 @@ const clockText=value=>value?new Date(value).toLocaleString('zh-CN'):'暂无记�
 function duration(ms){if(!Number.isFinite(ms)||ms<0)return '暂无记录';const seconds=Math.floor(ms/1000);if(seconds<60)return seconds+'秒';if(seconds<3600)return Math.floor(seconds/60)+'分'+seconds%60+'秒';return Math.floor(seconds/3600)+'小时'+Math.floor(seconds%3600/60)+'分';}
 function drawDetails(state,latency){
  const task=state.task||{},stats=task.stats||{},jobs=state.jobs||[];
+ if(state.overview)$('#projectSummary').textContent=state.overview.projects+' 个工程 · '+state.overview.threads+' 个会话 · '+state.overview.active+' 个正在工作';
  const elapsed=task.status==='inProgress'&&task.startedAt?Date.now()-Date.parse(task.startedAt):task.durationMs;
  $('#taskTiming').textContent=task.startedAt?'开始于 '+clockText(task.startedAt)+' · '+(task.status==='inProgress'?'已运行 ':'本轮耗时 ')+duration(elapsed):'等待任务时间信息';
  const attention=state.attention||[];$('#attention').hidden=!attention.length;$('#attention').textContent=attention.join('\n');
