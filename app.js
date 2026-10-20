@@ -1,7 +1,11 @@
+import {Discovery} from './discovery.js';
 const $=s=>document.querySelector(s);
 const key='dsss.remote.v1';let saved;try{saved=JSON.parse(localStorage.getItem(key)||'{}');}catch{saved={};}
-let endpoint=saved.endpoint||'',token=saved.token||'',updating=false,rendered='',retryRequest=null,selectedThread=saved.threadId||'',catalog=null;
-const store=()=>localStorage.setItem(key,JSON.stringify({endpoint,token,threadId:selectedThread}));
+let endpoint=saved.endpoint||'',token=saved.token||'',updating=false,loadingCatalog=false,rendered='',retryRequest=null,selectedThread=saved.threadId||'',catalog=null;
+let automatic=saved.automatic!==false,discoveryAt=saved.discoveryAt||'';
+const store=()=>localStorage.setItem(key,JSON.stringify({endpoint,token,threadId:selectedThread,automatic,discoveryAt}));
+const discovery=new Discovery({fetch:(...args)=>fetch(...args),endpoint,updatedAt:discoveryAt,onChange:(next,date)=>{endpoint=next;discoveryAt=date;store();$('#endpoint').value=next;$('#discoveryHint').textContent='已自动获取当前电脑地址';}});
+async function updateEndpoint(force=false){if(!automatic)return false;return discovery.refresh(force);}
 const option=(value,label)=>{const o=document.createElement('option');o.value=value;o.textContent=label;return o;};
 function pickThread(id){
  selectedThread=id;retryRequest=null;rendered='';store();$('#messages').replaceChildren();$('#jobs').replaceChildren();
@@ -23,8 +27,14 @@ async function loadCatalog(force=false){
  p.value=catalog.threads.find(t=>t.id===selectedThread)?.projectId||catalog.projects[0]?.id||'';drawThreads(p.value);
 }
 function toast(text){$('#toast').textContent=text;$('#toast').hidden=false;setTimeout(()=>$('#toast').hidden=true,3500);}
-async function api(path,options={}){
- const r=await fetch(endpoint+path,{...options,headers:{...(token?{Authorization:'Bearer '+token}:{}),...(options.body?{'Content-Type':'application/json'}:{}),...options.headers},signal:AbortSignal.timeout(30000),cache:'no-store'});
+async function api(path,options={},retried=false){
+ const requestedEndpoint=endpoint;
+ let r;try{r=await fetch(endpoint+path,{...options,headers:{...(token?{Authorization:'Bearer '+token}:{}),...(options.body?{'Content-Type':'application/json'}:{}),...options.headers},signal:AbortSignal.timeout(30000),cache:'no-store'});}catch(e){
+  if(!retried&&automatic){await updateEndpoint(true);if(endpoint!==requestedEndpoint&&(!options.method||options.method==='GET'))return api(path,options,true);}
+  throw Error(e.name==='TimeoutError'?'电脑响应超时，正在等待恢复':'暂时无法连接电脑，正在自动查找最新地址；请确认电脑和连接服务正在运行');
+ }
+ if([502,503,504,530].includes(r.status)&&!retried&&automatic){await updateEndpoint(true);if(endpoint!==requestedEndpoint&&(!options.method||options.method==='GET'))return api(path,options,true);}
+ if([502,503,504,530].includes(r.status))throw Error('外网隧道或电脑连接器不可用，请在电脑运行 start-console.ps1 -Restart 检查连接');
  let j;try{j=await r.json();}catch{throw Error('连接器未返回有效数据，请确认电脑连接地址');}
  if(!r.ok){if(r.status===401&&path!=='/api/login'){token='';store();showPair();}throw Error(j.error||'请求失败');}return j;
 }
@@ -53,7 +63,16 @@ function drawJobs(jobs){
  if(!jobs.length)box.append(textEl('p','empty','暂无手机发送记录'));
 }
 async function refresh(){
- if(!token||updating||!selectedThread)return;updating=true;const requested=selectedThread;
+ if(updating||loadingCatalog)return;
+ await updateEndpoint();
+ if(!token||updating||loadingCatalog)return;
+ if(!catalog){
+  loadingCatalog=true;
+  try{await loadCatalog();}catch(e){$('#dot').className='dot offline';$('#connectionText').textContent='连接中断';$('#activity').textContent=e.message;$('#syncTime').textContent='正在自动重试连接';}
+  finally{loadingCatalog=false;}
+  if(!catalog||!token)return;
+ }
+ if(!selectedThread)return;updating=true;const requested=selectedThread;
  try{
    const j=await api('/api/state?threadId='+encodeURIComponent(requested));if(requested!==selectedThread)return;connected();$('#dot').className='dot '+(j.connected?'online':'offline');$('#connectionText').textContent=j.connected?'电脑已连接':'桌面连接异常';
    $('#syncTime').textContent=j.syncedAt?'最近同步 '+new Date(j.syncedAt).toLocaleTimeString('zh-CN'):'等待首次同步';
@@ -65,6 +84,8 @@ async function refresh(){
 $('#pairForm').onsubmit=async e=>{
  e.preventDefault();$('#pairError').textContent='';const b=e.submitter;b.disabled=true;
  try{
+  await updateEndpoint(true);
+  if(!$('#endpoint').value.trim())throw Error('尚未获取到电脑地址，请确认电脑连接服务已启动，稍后重试');
   const u=new URL($('#endpoint').value.trim());if(u.protocol!=='https:'&&!(u.hostname==='127.0.0.1'&&u.protocol==='http:'))throw Error('外网连接地址必须使用HTTPS');if(u.username||u.password||u.search||u.hash)throw Error('连接地址不能包含密码或查询参数');endpoint=u.origin;
   const result=await api('/api/login',{method:'POST',body:JSON.stringify({code:$('#pairCode').value})});token=result.token;store();$('#pairCode').value='';connected();await loadCatalog();await refresh();toast('配对成功，已连接桌面');
  }catch(e){$('#pairError').textContent=e.message;}finally{b.disabled=false;}
@@ -83,9 +104,14 @@ $('#settingsBtn').onclick=()=>{$('#pairPanel').hidden=!$('#pairPanel').hidden;$(
 $('#refreshBtn').onclick=refresh;$('#bottomBtn').onclick=()=>$('#messages').scrollTop=$('#messages').scrollHeight;
 $('#logoutBtn').onclick=async()=>{try{await api('/api/logout',{method:'POST'});}catch{}token='';store();showPair();};
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
-try{const c=await fetch('connection.json',{cache:'no-store'}).then(r=>r.json());if(!endpoint)endpoint=c.endpoint||location.origin;}catch{if(!endpoint)endpoint=location.origin;}
+$('#autoEndpoint').checked=automatic;
+$('#endpoint').readOnly=automatic;
+$('#endpoint').required=!automatic;
+$('#autoEndpoint').onchange=async()=>{automatic=$('#autoEndpoint').checked;discovery.endpoint=endpoint;discovery.updatedAt=discoveryAt;$('#endpoint').readOnly=automatic;$('#endpoint').required=!automatic;store();if(automatic)await updateEndpoint(true);$('#discoveryHint').textContent=automatic?'自动查找电脑地址，无需手动修改':'手动填写电脑连接地址';};
+await updateEndpoint(true);
 $('#projectSelect').onchange=()=>drawThreads($('#projectSelect').value);
 $('#threadSelect').onchange=()=>pickThread($('#threadSelect').value);
 $('#catalogBtn').onclick=async()=>{try{await loadCatalog(true);}catch(e){toast(e.message);}};
-$('#endpoint').value=endpoint;if(token){connected();try{await loadCatalog();await refresh();}catch(e){$('#activity').textContent=e.message;}}else showPair();
+window.addEventListener('online',()=>refresh());
+$('#endpoint').value=endpoint;if(token){connected();await refresh();}else showPair();
 setInterval(()=>{if(!document.hidden)refresh();},4000);
