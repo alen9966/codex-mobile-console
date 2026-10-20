@@ -3,12 +3,14 @@ const $=s=>document.querySelector(s);
 const key='dsss.remote.v1';let saved;try{saved=JSON.parse(localStorage.getItem(key)||'{}');}catch{saved={};}
 let endpoint=saved.endpoint||'',token=saved.token||'',updating=false,loadingCatalog=false,rendered='',retryRequest=null,selectedThread=saved.threadId||'',catalog=null;
 let automatic=saved.automatic!==false,discoveryAt=saved.discoveryAt||'';
+let currentMessages=[];
 const store=()=>localStorage.setItem(key,JSON.stringify({endpoint,token,threadId:selectedThread,automatic,discoveryAt}));
 const discovery=new Discovery({fetch:(...args)=>fetch(...args),endpoint,updatedAt:discoveryAt,onChange:(next,date)=>{endpoint=next;discoveryAt=date;store();$('#endpoint').value=next;$('#discoveryHint').textContent='已自动获取当前电脑地址';}});
 async function updateEndpoint(force=false){if(!automatic)return false;return discovery.refresh(force);}
 const option=(value,label)=>{const o=document.createElement('option');o.value=value;o.textContent=label;return o;};
 function pickThread(id){
- selectedThread=id;retryRequest=null;rendered='';store();$('#messages').replaceChildren();$('#jobs').replaceChildren();
+ selectedThread=id;retryRequest=null;rendered='';currentMessages=[];store();$('#messages').replaceChildren();$('#jobs').replaceChildren();
+ drawDetails({},0);$('#historyHint').textContent='';
  $('#status').textContent=id?'读取中':'暂无会话';$('#messageCount').textContent='';$('#queueCount').textContent='0';
  const t=catalog.threads.find(t=>t.id===id);$('#targetHint').textContent=t?'发送目标：'+t.title:'该工程暂无会话；请先在电脑 Codex 中创建会话。';
  $('#sendBtn').disabled=!t;$('#taskTitle').textContent=t?.title||'暂无会话';$('#activity').textContent=t?'正在读取该会话…':'可在电脑打开工程并创建会话，再刷新工程列表。';$('#sendResult').textContent='';
@@ -16,11 +18,12 @@ function pickThread(id){
 }
 function drawThreads(projectId){
  const list=catalog.threads.filter(t=>t.projectId===projectId),select=$('#threadSelect');select.replaceChildren();
- for(const t of list)select.append(option(t.id,t.title));
+ for(const t of list)select.append(option(t.id,t.title+' · '+({active:'正在工作',idle:'空闲',notLoaded:'未加载',systemError:'需处理'}[t.status]||'状态待同步')));
  const id=list.some(t=>t.id===selectedThread)?selectedThread:list[0]?.id||'';select.value=id;select.disabled=!list.length;pickThread(id);
 }
 async function loadCatalog(force=false){
  catalog=await api('/api/catalog'+(force?'?refresh=1':''));
+ $('#projectSummary').textContent=catalog.projects.length+' 个工程 · '+catalog.threads.length+' 个会话 · '+catalog.threads.filter(x=>x.status==='active').length+' 个正在工作';
  const p=$('#projectSelect');p.replaceChildren();
  for(const project of catalog.projects){const n=catalog.threads.filter(t=>t.projectId===project.id).length;p.append(option(project.id,project.label+' · '+n+' 个会话'));}
  if(!catalog.threads.some(t=>t.id===selectedThread))selectedThread=catalog.defaultThreadId;
@@ -41,14 +44,40 @@ async function api(path,options={},retried=false){
 function showPair(){ $('#pairPanel').hidden=false;$('#workspace').hidden=true;$('#logoutBtn').hidden=true;$('#endpoint').value=endpoint;$('#connectionText').textContent='尚未配对';$('#dot').className='dot';}
 function connected(){ $('#pairPanel').hidden=true;$('#workspace').hidden=false;$('#logoutBtn').hidden=false;}
 function textEl(tag,cls,text){const el=document.createElement(tag);el.className=cls;el.textContent=text;return el;}
+const clockText=value=>value?new Date(value).toLocaleString('zh-CN'):'暂无记录';
+function duration(ms){if(!Number.isFinite(ms)||ms<0)return '暂无记录';const seconds=Math.floor(ms/1000);if(seconds<60)return seconds+'秒';if(seconds<3600)return Math.floor(seconds/60)+'分'+seconds%60+'秒';return Math.floor(seconds/3600)+'小时'+Math.floor(seconds%3600/60)+'分';}
+function drawDetails(state,latency){
+ const task=state.task||{},stats=task.stats||{},jobs=state.jobs||[];
+ const elapsed=task.status==='inProgress'&&task.startedAt?Date.now()-Date.parse(task.startedAt):task.durationMs;
+ $('#taskTiming').textContent=task.startedAt?'开始于 '+clockText(task.startedAt)+' · '+(task.status==='inProgress'?'已运行 ':'本轮耗时 ')+duration(elapsed):'等待任务时间信息';
+ const attention=state.attention||[];$('#attention').hidden=!attention.length;$('#attention').textContent=attention.join('\n');
+ $('#workStats').replaceChildren();
+ for(const [label,value,problem] of [['操作',stats.total,false],['变更文件',stats.files,false],['进行中',stats.running,false],['操作异常',stats.failed,true]]){
+  const el=textEl('div','work-stat'+(problem&&value?' problem':''),'');el.append(textEl('strong','',value??'—'),textEl('span','',label));$('#workStats').append(el);
+ }
+ $('#taskRequest').textContent=task.request||'当前读取范围内没有任务要求';
+ $('#lastReplyText').textContent=state.lastReply?.text||'当前读取范围内暂无完成回复';$('#lastReplyTime').textContent=state.lastReply?.turnStartedAt?'（该轮开始于 '+clockText(state.lastReply.turnStartedAt)+'）':'';
+ const operations=task.operations||[],labels={inProgress:'进行中',completed:'已结束',failed:'异常',declined:'未批准',recorded:'已记录',unknown:'状态未知'};
+ $('#operations').replaceChildren();$('#operationCount').textContent=stats.total?stats.total+' 次操作，展示最近 '+operations.length+' 条':'';
+ for(const op of operations){const status=op.exitCode!==null&&op.exitCode!==undefined&&op.exitCode!==0?'异常（退出码 '+op.exitCode+'）':labels[op.status]||'状态未知';$('#operations').append(textEl('li',status.startsWith('异常')?'error':'',op.label+' · '+status+(Number.isFinite(op.durationMs)?' · '+duration(op.durationMs):'')));}
+ if(!operations.length)$('#operations').append(textEl('li','muted','本轮暂无可展示的工作记录'));
+ $('#changedFiles').replaceChildren();$('#fileCount').textContent=stats.files?stats.files+' 个文件':'';
+ for(const file of task.files||[]){const kind={add:'新增',create:'新增',delete:'删除',update:'修改',move:'移动'}[file.kind]||'变更';$('#changedFiles').append(textEl('li','',kind+' · '+file.path+(file.status==='failed'?'（操作异常）':'')));}
+ if(!(task.files||[]).length)$('#changedFiles').append(textEl('li','muted','本轮暂无文件变更记录'));
+ $('#connectionDetails').textContent=state.connector?'接口响应 '+latency+'毫秒 · 连接器已运行 '+duration(state.connector.uptimeSeconds*1000)+'\n会话更新于 '+clockText(state.thread?.updatedAt)+(state.connector.sessionExpiresAt?'\n此设备配对有效至 '+clockText(state.connector.sessionExpiresAt):''):'等待连接信息';
+ $('#queueSummary').textContent=jobs.length?'手机发送记录：'+jobs.filter(x=>x.state==='queued').length+' 条排队 · '+jobs.filter(x=>x.state==='accepted').length+' 条已接收 · '+jobs.filter(x=>['failed','uncertain'].includes(x.state)).length+' 条需核对':'当前会话暂无手机发送记录';
+}
 function drawMessages(messages){
- const signature=messages.map(x=>x.id+':'+x.text).join('|');if(signature===rendered)return;rendered=signature;
+ currentMessages=messages;
+ const mode=$('#messageFilter').value||'all',query=($('#messageSearch').value||'').trim().toLowerCase(),total=messages.length;
+ messages=messages.filter(x=>(mode==='all'||(mode==='progress'?x.phase==='commentary':x.role==='user'||['final','final_answer'].includes(x.phase)))&&(!query||x.text.toLowerCase().includes(query)));
+ const signature=mode+query+messages.map(x=>x.id+':'+x.text).join('|');if(signature===rendered)return;rendered=signature;
  const box=$('#messages'),nearBottom=box.scrollHeight-box.scrollTop-box.clientHeight<90||!box.children.length;
  const oldScroll=box.scrollTop;box.replaceChildren();
  for(const m of messages){const el=textEl('article','message '+m.role+' '+m.phase,'');el.append(textEl('div','who',m.role==='user'?'你 / 任务输入':m.phase==='commentary'?'CODEX / 进度更新':'CODEX / 回复'));el.append(textEl('div','bubble',m.text));box.append(el);}
- if(!messages.length)box.append(textEl('p','empty','当前会话暂无消息'));
+ if(!messages.length)box.append(textEl('p','empty',total?'没有匹配的对话，请调整筛选或搜索':'当前会话暂无消息'));
  if(nearBottom)box.scrollTop=box.scrollHeight;else box.scrollTop=oldScroll;
- $('#messageCount').textContent='最近 '+messages.length+' 条';
+ $('#messageCount').textContent='显示 '+messages.length+' / '+total+' 条';
 }
 function drawJobs(jobs){
  const box=$('#jobs');box.replaceChildren();$('#queueCount').textContent=jobs.filter(x=>x.state==='queued').length;
@@ -74,10 +103,12 @@ async function refresh(){
  }
  if(!selectedThread)return;updating=true;const requested=selectedThread;
  try{
+   const started=Date.now();
    const j=await api('/api/state?threadId='+encodeURIComponent(requested));if(requested!==selectedThread)return;connected();$('#dot').className='dot '+(j.connected?'online':'offline');$('#connectionText').textContent=j.connected?'电脑已连接':'桌面连接异常';
    $('#syncTime').textContent=j.syncedAt?'最近同步 '+new Date(j.syncedAt).toLocaleTimeString('zh-CN'):'等待首次同步';
    const t=j.thread||{};$('#status').textContent=t.statusLabel||'未连接';$('#status').className='badge '+(t.status==='active'?'':'neutral');$('#taskTitle').textContent=t.title||'当前桌面任务';$('#activity').textContent=j.error||j.activity||'等待任务';
    drawMessages(j.messages||[]);drawJobs(j.jobs||[]);
+   drawDetails(j,Date.now()-started);$('#historyHint').textContent='已加载最近 '+(j.history?.turns??'若干')+' 轮对话'+(j.history?.hasMore?'，更早内容请在电脑查看':'')+'；支持筛选和搜索。';
  }catch(e){if(requested===selectedThread){$('#dot').className='dot offline';$('#connectionText').textContent='连接中断';$('#syncTime').textContent='保留上次内容；联网后自动重试';$('#activity').textContent=e.message;}}
  finally{updating=false;if(requested!==selectedThread&&selectedThread)refresh();}
 }
@@ -112,6 +143,8 @@ await updateEndpoint(true);
 $('#projectSelect').onchange=()=>drawThreads($('#projectSelect').value);
 $('#threadSelect').onchange=()=>pickThread($('#threadSelect').value);
 $('#catalogBtn').onclick=async()=>{try{await loadCatalog(true);}catch(e){toast(e.message);}};
+$('#messageFilter').onchange=()=>{rendered='';drawMessages(currentMessages);};
+$('#messageSearch').oninput=()=>{rendered='';drawMessages(currentMessages);};
 window.addEventListener('online',()=>refresh());
 $('#endpoint').value=endpoint;if(token){connected();await refresh();}else showPair();
 setInterval(()=>{if(!document.hidden)refresh();},4000);
